@@ -1,0 +1,359 @@
+---
+title: "Mamiferos en regiones"
+author: "Kimberline Reyes Macis &  Rosalyn Barrantes Madrigal"
+format: 
+  html:
+    page-layout: custom
+    lang: es
+    theme: cosmo    
+    margin-top: 40px
+    margin-left: 40px
+    margin-bottom: 15px        
+    margin-right: 15px
+server: shiny
+---
+## Carga de datos
+
+```{r}
+#| label: carga-paquetes
+#| context: setup
+#| warning: false
+#| message: false
+
+# Carga de paquetes
+library(tidyverse)
+library(DT)
+library(sf)
+library(leaflet)
+library(leaflet.extras)
+library(leafem)
+library(plotly)
+library(viridisLite)
+library(quarto)
+library(rsconnect)
+library(shiny)
+```
+
+## Regiones Y Mamiferos
+```{r}
+#| label: carga-datos 1
+#| context: data
+#| code-fold: true
+
+regiones<-
+  st_read("regiones_socioeconomicas_simp_10m.geojson",
+          quiet= TRUE
+          ) |>
+  st_transform(4326)
+
+# Carga de datos de Mamiferos de Costa Rica
+mamiferos <-
+  st_read(
+    "mamiferos.csv",
+    options = c(
+      "X_POSSIBLE_NAMES=decimalLongitude", # columna de longitud decimal
+      "Y_POSSIBLE_NAMES=decimalLatitude"   # columna de latitud decimal
+    ),
+    quiet = TRUE
+  )
+
+# Asignación del CRS WGS84
+st_crs(mamiferos) <- 4326
+
+#Union
+
+mamiferos_union_regiones <- 
+  st_join(
+    x = mamiferos,
+    y = dplyr::select(regiones, region), #selección de columna codigo
+    join = st_within
+  )
+
+# Riquezas de registros
+
+riqueza_mamiferos_regiones_presencia <- 
+  mamiferos_union_regiones |>
+  st_drop_geometry() |>
+  group_by(region) |>
+  summarize(riqueza_mamiferos_regiones_presencia = n())
+
+# Union no espacial de regiones con el dataframe de riqueza
+
+regiones_union_riqueza_mamiferos_presencia <- 
+  left_join(
+    x = regiones,
+    y = riqueza_mamiferos_regiones_presencia,
+    by = "region"
+  ) |>
+  replace_na(list(riqueza_mamiferos_regiones_presencia = 0))
+    
+
+```
+
+```{r}
+#| label: panel-widgets-entrada
+#| panel: sidebar
+
+# Lista ordenada de especies
+# con un elemento adicional = "Todas"
+lista_especies <- unique(mamiferos$species)
+lista_especies <- sort(lista_especies)
+lista_especies <- c("Todas", lista_especies)
+
+# Widget de lista de selección de especies
+selectInput(
+  inputId = "especie",      # identificador del widget
+  label = "Especie",        # etiqueta de la lista
+  choices = lista_especies, # lista de opciones para seleccionar de la lista
+  selected = "Todas"        # opción seleccionada por defecto
+)
+
+# Lista ordenada de años
+lista_anios <- unique(mamiferos$year)
+lista_anios <- sort(lista_anios)
+lista_anios <- c("Todos", lista_anios)
+
+# Widget de lista de selección de años
+selectInput(
+  inputId = "anio",      # identificador del widget
+  label = "Año",         # etiqueta de la lista
+  choices = lista_anios, # lista de opciones para seleccionar de la lista
+  selected = "Todos"     # opción seleccionada por defecto
+)
+
+# Lista ordenada de meses
+lista_meses <- unique(mamiferos$month)
+lista_meses <- sort(lista_meses)
+lista_meses <- c("Todos", lista_meses)
+
+# Widget de lista de selección de meses
+selectInput(
+	inputId = "mes",
+	label = "Mes",
+	choices = lista_meses,
+	selected = "Todos"
+)
+```
+
+```{r}
+#| label: panel-widgets-salida
+#| panel: center
+
+
+h3("Distribución geoespacial")
+HTML("<p>")
+leafletOutput(
+	outputId = "mapa"
+)
+
+# Encabezado de nivel 3
+h3("Registros de presencia")
+HTML("<p>")
+dataTableOutput(
+	outputId = "tabla"
+)
+
+h3("Registros de presencia por especie")
+HTML("<p>")
+plotlyOutput(
+	outputId = "grafico"
+)
+```
+
+```{r}
+#| label: servidor
+#| context: server
+
+# Función reactiva para filtrar los registros de presencia de mamíferos
+# de acuerdo con los filtros especificados por el usuario
+filtrar_mamiferos <- reactive({
+  # Valor inicial del objeto que va a retornarse
+  mamiferos_filtrados <- mamiferos_union_regiones
+  
+  # Se realiza el filtro, solamente si el usario ha seleccionado 
+  # una opción diferente a "Todas" en la lista de selección de especies
+  if (input$especie != "Todas") {
+    mamiferos_filtrados <-
+      mamiferos_filtrados |>
+      filter(species == input$especie)
+  }
+  
+  # Filtro de años (lista de selección)
+  if (input$anio != "Todos") {
+    mamiferos_filtrados <-
+      mamiferos_filtrados |>
+      filter(year == input$anio)
+  }
+  
+  # Filtro de meses
+  if (input$mes != "Todos") {
+    mamiferos_filtrados <-
+      mamiferos_filtrados |>
+      filter(month == input$mes)
+  }
+
+  return(mamiferos_filtrados)
+}) 
+
+# FunciC3n reactiva para filtrar los registros de presencia de mamiferos unidos con regiones
+# de acuerdo con los filtros especificados por el usuario
+  filtrar_mamiferos_union_regiones <- reactive({
+  # Valor inicial del objeto que va a retornarse
+  mamiferos_union_regiones_filtrados <- mamiferos_union_regiones
+
+  return(mamiferos_union_regiones_filtrados)
+  })
+
+
+# Tabla interactiva de registros de presencia y mapa interactivo
+  output$tabla <- renderDataTable({
+    # Filtrado del conjunto de datos
+    mamiferos_union_regiones <- filtrar_mamiferos()
+    
+     # Tabla interactiva
+  riqueza_mamiferos_regiones_presencia |>
+    st_drop_geometry() |>
+    select( region, riqueza_mamiferos_regiones_presencia) |>
+    datatable(
+    	rownames = FALSE,
+      colnames = c("Región", "Cantidad de registros de presencia"),
+      options = list(
+      	pageLength = 20,
+        language = list(url = '//cdn.datatables.net/plug-ins/1.10.11/i18n/Spanish.json')
+      )
+    )
+})
+
+# Paleta de colores de riqueza de especies de mamiferos
+colores_riqueza_especies_mamiferos <-
+  colorNumeric(
+    palette = "Reds",
+    domain = regiones_union_riqueza_mamiferos_presencia$riqueza_mamiferos_regiones_presencia,
+    na.color = "transparent")
+
+# Paleta de colores de especies de mamiferos
+colores_especies_mamiferos <- colorFactor(
+  palette = viridis(length(unique(mamiferos$species))), 
+  domain = mamiferos$species
+)
+
+# Mapa interactivo de registros de presencia
+output$mapa <- renderLeaflet({
+	# Filtrado del conjunto de datos
+  mamiferos <- filtrar_mamiferos()
+  
+leaflet() |>
+  setView(
+    lng = -84.19452,
+    lat = 9.572735,
+    zoom = 7) |>
+  addTiles(group = "Mapa general (OpenStreetMap)") |>
+  addProviderTiles(
+    providers$Esri.WorldImagery, 
+    group = "Imágenes satelitales (ESRI World Imagery)"
+  )|> 
+  addPolygons(
+    data = regiones_union_riqueza_mamiferos_presencia,
+    fillColor = ~ colores_riqueza_especies_mamiferos(regiones_union_riqueza_mamiferos_presencia$riqueza_mamiferos_regiones_presencia),
+    fillOpacity = 0.8,
+    color = "black",
+    stroke = TRUE,
+    weight = 1.0,
+    popup = paste(
+      paste("<strong>Area de presencia:</strong>", regiones$region),
+      paste("<strong>Registros de especies:</strong>", regiones_union_riqueza_mamiferos_presencia$riqueza_mamiferos_regiones_presencia),
+      sep = '<br/>'
+    ),
+    group = "Registros de especies"
+  )|>
+  addScaleBar(
+    position = "bottomleft", 
+    options = scaleBarOptions(imperial = FALSE)
+  ) |>    
+  addLegend(
+    position = "bottomleft",
+    pal = colores_riqueza_especies_mamiferos,
+    values = regiones_union_riqueza_mamiferos_presencia$riqueza_mamiferos_regiones_presencia,
+    group = "Registros de especies",
+    title = "Registros de especies"
+  )|>
+  addCircleMarkers(
+    data = mamiferos,
+    stroke = F,
+    radius = 4,
+    fillColor = ~colores_especies_mamiferos(mamiferos$species),
+    fillOpacity = 1.0,
+    popup = paste(
+      paste0("<strong>Especie: </strong>", mamiferos$species),
+      paste0("<strong>Localidad: </strong>", mamiferos$locality),
+      paste0("<strong>Fecha: </strong>", mamiferos$eventDate),
+      paste0("<strong>Fuente: </strong>", mamiferos$institutionCode),
+      paste0("<a href='", mamiferos$occurrenceID, "'>Más información</a>"),
+      sep = '<br/>'
+    ),    
+    group = "Registros de presencia"
+  )|>  
+  addLegend(
+    position = "bottomright",    
+    pal = colores_especies_mamiferos,
+    values = mamiferos$species,
+    title = "Especies",
+    group = "Registros de presencia"    
+  ) |>  
+  addLayersControl(
+    baseGroups = c(
+      "Mapa general (OpenStreetMap)", 
+      "Imágenes satelitales (ESRI World Imagery)"
+    ),
+    overlayGroups = c(
+      "Riqueza de especies",
+      "Registros de presencia"
+    )
+  ) |>
+  addResetMapButton() |>
+  addSearchOSM() |>
+  addMouseCoordinates() |>
+  addFullscreenControl() |>
+  hideGroup("Registros de presencia")
+})
+
+# GeneraciC3n de grC!fico interactivo Plotly
+  output$grafico <- renderPlotly({
+	# Filtrado del conjunto de datos
+  mamiferos_union_regiones <- filtrar_mamiferos_union_regiones()
+  
+	# CC!lculo de la cantidad de registros de presencia en rengiones
+	cantidad_registros_mamiferos <-
+	  mamiferos_union_regiones |>
+	  st_drop_geometry() |>
+	  group_by(region) |>
+	  summarize(cantidad_registros = n()) |> # conteo de los registros de presencia (puntos)
+		drop_na(region) # eliminaciC3n de los registros en region "nulo" (los que caen en el mar)
+  
+  # GrC!fico ggplot2
+grafico_ggplot2 <- 
+	cantidad_registros_mamiferos |>
+  ggplot(
+    aes(
+      x = reorder(region, -cantidad_registros), 
+      y = cantidad_registros,
+      text = paste0(
+        "Región: ", region, "\n",
+        "Cantidad de registros: ", cantidad_registros
+      )
+    )
+  ) +
+  geom_col() +
+  xlab("Región") +
+  ylab("Cantidad de registros de presencia") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Genera el grC!fico interactivo con plotly sin el uso de |> (pipe operator)
+grafico_plotly <- ggplotly(grafico_ggplot2, tooltip = "text")
+config_plotly <- config(grafico_plotly, locale = 'es')
+
+# Mostrar el grafico interactivo
+print(config_plotly)
+})
+```
